@@ -139,8 +139,7 @@ To contribute code:
 1. Fork the repository.
 2. Create a new branch for your changes.
 3. Make your changes and add tests if applicable.
-4. Run the test suite with `npm test` (if applicable).
-5. Submit a pull request with a clear description of your changes.
+4. Submit a pull request with a clear description of your changes.
 
 Please ensure your code follows the existing style and passes all tests before submitting a pull request.
 
