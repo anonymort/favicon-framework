@@ -155,4 +155,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Contact
 
-For questions, support, or to report issues, please open an issue on the GitHub repository: [https://github.com/yourusername/favicon-updater](https://github.com/anonymort/favicon-framework/issues)
+For questions, support, or to report issues, please open an issue on the GitHub repository.
