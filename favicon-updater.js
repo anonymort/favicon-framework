@@ -1,6 +1,7 @@
 const ALLOWED_URL_SCHEMES = ['http:', 'https:', 'data:', 'blob:'];
 const IMAGE_CACHE_MAX = 20;
 const FAVICON_SIZE = 32;
+const VALID_BADGE_POSITIONS = ['top-right', 'top-left', 'bottom-right', 'bottom-left'];
 
 class FaviconUpdater {
     constructor(config) {
@@ -25,6 +26,9 @@ class FaviconUpdater {
         this._imageCache = new Map();
         this._canvasSupported = null;
         this._renderGeneration = 0;
+        this._animationCanvas = null;
+
+        this._boundVisibilityChange = this._handleVisibilityChange.bind(this);
 
         this.init(config);
         this.setupEventListeners();
@@ -67,6 +71,9 @@ class FaviconUpdater {
     setupEventListeners() {
         if (typeof window === 'undefined') return;
         window.addEventListener('storage', this._boundHandleStorage);
+        if (typeof document !== 'undefined' && document.addEventListener) {
+            document.addEventListener('visibilitychange', this._boundVisibilityChange);
+        }
     }
 
     destroy() {
@@ -74,6 +81,10 @@ class FaviconUpdater {
         this._badge = null;
         this._badgeCache = null;
         this._imageCache.clear();
+        this._animationCanvas = null;
+        if (typeof document !== 'undefined' && document.removeEventListener) {
+            document.removeEventListener('visibilitychange', this._boundVisibilityChange);
+        }
         if (typeof window === 'undefined') return;
         window.removeEventListener('storage', this._boundHandleStorage);
     }
@@ -197,6 +208,9 @@ class FaviconUpdater {
             position: 'top-right'
         };
         this._badge = { count, ...defaults, ...(options || {}) };
+        if (!VALID_BADGE_POSITIONS.includes(this._badge.position)) {
+            throw new Error(`Invalid badge position: "${this._badge.position}". Expected one of: ${VALID_BADGE_POSITIONS.join(', ')}`);
+        }
         this._badgeCache = null;
 
         if (this._animation) {
@@ -219,13 +233,18 @@ class FaviconUpdater {
         }
     }
 
+    _badgeCacheKey(badge) {
+        return `${badge.backgroundColor}|${badge.textColor}|${badge.size}|${badge.position}`;
+    }
+
     _applyOverlay(baseUrl) {
         const generation = ++this._renderGeneration;
         const badge = this._badge;
         if (!badge || badge.count <= 0) return;
 
-        // Check cache
-        if (this._badgeCache && this._badgeCache.baseUrl === baseUrl && this._badgeCache.count === badge.count) {
+        // Check cache (includes options to avoid stale renders on option changes)
+        const optionsKey = this._badgeCacheKey(badge);
+        if (this._badgeCache && this._badgeCache.baseUrl === baseUrl && this._badgeCache.count === badge.count && this._badgeCache.optionsKey === optionsKey) {
             this.updateFavicon(this._badgeCache.dataUrl);
             return;
         }
@@ -238,17 +257,18 @@ class FaviconUpdater {
             canvas.width = FAVICON_SIZE;
             canvas.height = FAVICON_SIZE;
             const ctx = canvas.getContext('2d');
+            if (!ctx) return; // canvas context unavailable — fall back to base icon
             ctx.drawImage(img, 0, 0, FAVICON_SIZE, FAVICON_SIZE);
             this._drawBadge(ctx, FAVICON_SIZE, badge);
             const dataUrl = canvas.toDataURL('image/png');
 
-            this._badgeCache = { baseUrl, count: badge.count, dataUrl };
+            this._badgeCache = { baseUrl, count: badge.count, optionsKey, dataUrl };
 
             if (this._renderGeneration === generation && !this._animation) {
                 this.updateFavicon(dataUrl);
             }
-        }).catch(() => {
-            // Fallback: unbadged icon already set synchronously
+        }).catch((err) => {
+            console.warn('FaviconUpdater: badge overlay failed, using base icon.', err);
         });
     }
 
@@ -320,7 +340,8 @@ class FaviconUpdater {
             baseUrl,
             startTime: null,
             lastFrameTime: 0,
-            isCustom
+            isCustom,
+            _loadedUrl: null
         };
         this._animation = animation;
 
@@ -328,9 +349,10 @@ class FaviconUpdater {
             // Check that this animation is still the active one (race condition guard)
             if (this._animation !== animation) return;
             animation.startTime = performance.now();
+            animation._loadedUrl = baseUrl;
             this._animateFrame(animation, img);
-        }).catch(() => {
-            // Image failed to load — cancel animation, restore static icon
+        }).catch((err) => {
+            console.warn('FaviconUpdater: animation image load failed, cancelling animation.', err);
             if (this._animation === animation) {
                 this._animation = null;
                 this.applyState();
@@ -345,7 +367,26 @@ class FaviconUpdater {
             this._animationFrameId = null;
         }
         this._animation = null;
+        this._animationCanvas = null;
         this.applyState();
+    }
+
+    _handleVisibilityChange() {
+        if (!this._animation) return;
+        if (document.hidden) {
+            if (this._animationFrameId != null) {
+                cancelAnimationFrame(this._animationFrameId);
+                this._animationFrameId = null;
+            }
+        } else {
+            if (this._animationFrameId == null) {
+                this._loadImage(this._animation.baseUrl).then(img => {
+                    if (this._animation && this._animationFrameId == null) {
+                        this._animateFrame(this._animation, img);
+                    }
+                }).catch(() => {});
+            }
+        }
     }
 
     _animateFrame(animation, baseImage) {
@@ -379,14 +420,23 @@ class FaviconUpdater {
         this._animationFrameId = requestAnimationFrame(() => this._animateFrame(animation, baseImage));
     }
 
+    _getAnimationCanvas() {
+        if (!this._animationCanvas) {
+            this._animationCanvas = document.createElement('canvas');
+            this._animationCanvas.width = FAVICON_SIZE;
+            this._animationCanvas.height = FAVICON_SIZE;
+        }
+        return this._animationCanvas;
+    }
+
     _renderAnimationFrame(animation, baseImage, now) {
         const elapsed = (now - animation.startTime) / 1000;
         const progress = (elapsed * animation.options.speed) % 1;
 
-        const canvas = document.createElement('canvas');
-        canvas.width = FAVICON_SIZE;
-        canvas.height = FAVICON_SIZE;
+        const canvas = this._getAnimationCanvas();
         const ctx = canvas.getContext('2d');
+        if (!ctx) return; // canvas context unavailable
+        ctx.clearRect(0, 0, FAVICON_SIZE, FAVICON_SIZE);
 
         if (animation.isCustom) {
             animation.type(ctx, FAVICON_SIZE, progress, baseImage);
