@@ -1,4 +1,6 @@
 const ALLOWED_URL_SCHEMES = ['http:', 'https:', 'data:', 'blob:'];
+const IMAGE_CACHE_MAX = 20;
+const FAVICON_SIZE = 32;
 
 class FaviconUpdater {
     constructor(config) {
@@ -10,6 +12,19 @@ class FaviconUpdater {
         this.overrideIcon = '';
         this._storageKey = 'faviconState';
         this._boundHandleStorage = this.handleStorageEvent.bind(this);
+
+        // Badge state
+        this._badge = null;
+        this._badgeCache = null; // { baseUrl, count, dataUrl }
+
+        // Animation state
+        this._animation = null;
+        this._animationFrameId = null;
+
+        // Shared infrastructure
+        this._imageCache = new Map();
+        this._canvasSupported = null;
+        this._renderGeneration = 0;
 
         this.init(config);
         this.setupEventListeners();
@@ -55,6 +70,10 @@ class FaviconUpdater {
     }
 
     destroy() {
+        this.stopAnimation();
+        this._badge = null;
+        this._badgeCache = null;
+        this._imageCache.clear();
         if (typeof window === 'undefined') return;
         window.removeEventListener('storage', this._boundHandleStorage);
     }
@@ -79,24 +98,341 @@ class FaviconUpdater {
         }
     }
 
-    applyState() {
+    // --- Base URL resolution (extracted from applyState) ---
+
+    _resolveBaseUrl() {
         if (this.overrideIcon) {
-            this.updateFavicon(this.overrideIcon);
-            return;
+            return this.overrideIcon;
         }
         if (this.activeStates.length > 0) {
             this.activeStates.sort((a, b) => (this.priorityMap.get(b) ?? 0) - (this.priorityMap.get(a) ?? 0));
             const topState = this.activeStates[0];
             const icon = this.states[topState];
             if (typeof icon === 'string') {
-                this.updateFavicon(icon);
-            } else {
-                this.updateFavicon(this.defaultIcon);
+                return icon;
             }
-        } else {
-            this.updateFavicon(this.defaultIcon);
+        }
+        return this.defaultIcon;
+    }
+
+    applyState() {
+        const baseUrl = this._resolveBaseUrl();
+
+        // If animation is running, update its base URL — the animation loop handles favicon updates
+        if (this._animation) {
+            this._animation.baseUrl = baseUrl;
+            return;
+        }
+
+        // Sync: set the base icon immediately
+        this.updateFavicon(baseUrl);
+
+        // Async: overlay badge if active
+        if (this._badge && this._badge.count > 0 && this._canUseCanvas()) {
+            this._applyOverlay(baseUrl);
         }
     }
+
+    // --- Canvas support detection ---
+
+    _canUseCanvas() {
+        if (this._canvasSupported !== null) return this._canvasSupported;
+        try {
+            if (typeof document === 'undefined') {
+                this._canvasSupported = false;
+                return false;
+            }
+            const canvas = document.createElement('canvas');
+            this._canvasSupported = !!(canvas && canvas.getContext && canvas.getContext('2d'));
+        } catch {
+            this._canvasSupported = false;
+        }
+        return this._canvasSupported;
+    }
+
+    // --- Image loading with cache ---
+
+    _loadImage(url) {
+        if (this._imageCache.has(url)) {
+            return Promise.resolve(this._imageCache.get(url));
+        }
+        return new Promise((resolve, reject) => {
+            if (typeof Image === 'undefined') {
+                return reject(new Error('Image not available'));
+            }
+            const img = new Image();
+            if (!url.startsWith('data:')) {
+                img.crossOrigin = 'anonymous';
+            }
+            img.onload = () => {
+                // Evict oldest entry if cache is full
+                if (this._imageCache.size >= IMAGE_CACHE_MAX) {
+                    const firstKey = this._imageCache.keys().next().value;
+                    this._imageCache.delete(firstKey);
+                }
+                this._imageCache.set(url, img);
+                resolve(img);
+            };
+            img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
+            img.src = url;
+        });
+    }
+
+    // --- Badge support ---
+
+    setBadge(count, options) {
+        if (typeof count !== 'number' || !Number.isFinite(count)) {
+            throw new Error('Badge count must be a finite number');
+        }
+        count = Math.max(0, Math.floor(count));
+        if (count === 0) {
+            this.clearBadge();
+            return;
+        }
+
+        const defaults = {
+            backgroundColor: '#FF0000',
+            textColor: '#FFFFFF',
+            size: 0.4,
+            position: 'top-right'
+        };
+        this._badge = { count, ...defaults, ...(options || {}) };
+        this._badgeCache = null;
+
+        if (this._animation) {
+            // Animation loop will pick up the badge on next frame
+            return;
+        }
+
+        const baseUrl = this._resolveBaseUrl();
+        this.updateFavicon(baseUrl);
+        if (this._canUseCanvas()) {
+            this._applyOverlay(baseUrl);
+        }
+    }
+
+    clearBadge() {
+        this._badge = null;
+        this._badgeCache = null;
+        if (!this._animation) {
+            this.applyState();
+        }
+    }
+
+    _applyOverlay(baseUrl) {
+        const generation = ++this._renderGeneration;
+        const badge = this._badge;
+        if (!badge || badge.count <= 0) return;
+
+        // Check cache
+        if (this._badgeCache && this._badgeCache.baseUrl === baseUrl && this._badgeCache.count === badge.count) {
+            this.updateFavicon(this._badgeCache.dataUrl);
+            return;
+        }
+
+        this._loadImage(baseUrl).then(img => {
+            if (this._renderGeneration !== generation) return;
+            if (this._animation) return; // animation took over
+
+            const canvas = document.createElement('canvas');
+            canvas.width = FAVICON_SIZE;
+            canvas.height = FAVICON_SIZE;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, FAVICON_SIZE, FAVICON_SIZE);
+            this._drawBadge(ctx, FAVICON_SIZE, badge);
+            const dataUrl = canvas.toDataURL('image/png');
+
+            this._badgeCache = { baseUrl, count: badge.count, dataUrl };
+
+            if (this._renderGeneration === generation && !this._animation) {
+                this.updateFavicon(dataUrl);
+            }
+        }).catch(() => {
+            // Fallback: unbadged icon already set synchronously
+        });
+    }
+
+    _drawBadge(ctx, size, badge) {
+        const radius = size * badge.size * 0.5;
+        let cx, cy;
+        const margin = radius * 0.15;
+        switch (badge.position) {
+            case 'top-left':
+                cx = radius + margin;
+                cy = radius + margin;
+                break;
+            case 'bottom-right':
+                cx = size - radius - margin;
+                cy = size - radius - margin;
+                break;
+            case 'bottom-left':
+                cx = radius + margin;
+                cy = size - radius - margin;
+                break;
+            case 'top-right':
+            default:
+                cx = size - radius - margin;
+                cy = radius + margin;
+                break;
+        }
+
+        // Draw circle
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+        ctx.fillStyle = badge.backgroundColor;
+        ctx.fill();
+
+        // Draw text
+        const text = badge.count > 99 ? '99+' : String(badge.count);
+        const fontSize = radius * (text.length > 2 ? 0.9 : 1.1);
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = badge.textColor;
+        ctx.fillText(text, cx, cy);
+    }
+
+    // --- Animation support ---
+
+    startAnimation(type, options) {
+        this.stopAnimation();
+
+        if (!this._canUseCanvas()) return;
+        if (typeof requestAnimationFrame === 'undefined') return;
+
+        const isCustom = typeof type === 'function';
+        if (!isCustom && type !== 'spinner' && type !== 'pulse') {
+            throw new Error(`Invalid animation type: ${type}. Expected 'spinner', 'pulse', or a function.`);
+        }
+
+        const defaults = {
+            color: '#4285F4',
+            speed: 1.0,
+            fps: 15,
+            baseIcon: null
+        };
+        const opts = { ...defaults, ...(options || {}) };
+
+        const baseUrl = opts.baseIcon || this._resolveBaseUrl();
+        const animation = {
+            type,
+            options: opts,
+            baseUrl,
+            startTime: null,
+            lastFrameTime: 0,
+            isCustom
+        };
+        this._animation = animation;
+
+        this._loadImage(baseUrl).then(img => {
+            // Check that this animation is still the active one (race condition guard)
+            if (this._animation !== animation) return;
+            animation.startTime = performance.now();
+            this._animateFrame(animation, img);
+        }).catch(() => {
+            // Image failed to load — cancel animation, restore static icon
+            if (this._animation === animation) {
+                this._animation = null;
+                this.applyState();
+            }
+        });
+    }
+
+    stopAnimation() {
+        if (!this._animation) return;
+        if (this._animationFrameId != null) {
+            cancelAnimationFrame(this._animationFrameId);
+            this._animationFrameId = null;
+        }
+        this._animation = null;
+        this.applyState();
+    }
+
+    _animateFrame(animation, baseImage) {
+        if (this._animation !== animation) return;
+
+        const now = performance.now();
+        const minInterval = 1000 / animation.options.fps;
+
+        if (now - animation.lastFrameTime < minInterval) {
+            this._animationFrameId = requestAnimationFrame(() => this._animateFrame(animation, baseImage));
+            return;
+        }
+        animation.lastFrameTime = now;
+
+        // Check if base URL changed (state change during animation)
+        if (animation.baseUrl !== (animation._loadedUrl || baseImage.src)) {
+            this._loadImage(animation.baseUrl).then(newImg => {
+                if (this._animation !== animation) return;
+                animation._loadedUrl = animation.baseUrl;
+                this._renderAnimationFrame(animation, newImg, now);
+                this._animationFrameId = requestAnimationFrame(() => this._animateFrame(animation, newImg));
+            }).catch(() => {
+                if (this._animation !== animation) return;
+                this._renderAnimationFrame(animation, baseImage, now);
+                this._animationFrameId = requestAnimationFrame(() => this._animateFrame(animation, baseImage));
+            });
+            return;
+        }
+
+        this._renderAnimationFrame(animation, baseImage, now);
+        this._animationFrameId = requestAnimationFrame(() => this._animateFrame(animation, baseImage));
+    }
+
+    _renderAnimationFrame(animation, baseImage, now) {
+        const elapsed = (now - animation.startTime) / 1000;
+        const progress = (elapsed * animation.options.speed) % 1;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = FAVICON_SIZE;
+        canvas.height = FAVICON_SIZE;
+        const ctx = canvas.getContext('2d');
+
+        if (animation.isCustom) {
+            animation.type(ctx, FAVICON_SIZE, progress, baseImage);
+        } else if (animation.type === 'spinner') {
+            this._drawSpinner(ctx, FAVICON_SIZE, progress, baseImage, animation.options);
+        } else if (animation.type === 'pulse') {
+            this._drawPulse(ctx, FAVICON_SIZE, progress, baseImage, animation.options);
+        }
+
+        // Composite badge on top if active
+        if (this._badge && this._badge.count > 0) {
+            this._drawBadge(ctx, FAVICON_SIZE, this._badge);
+        }
+
+        this.updateFavicon(canvas.toDataURL('image/png'));
+    }
+
+    _drawSpinner(ctx, size, progress, baseImage, options) {
+        // Draw base image slightly dimmed
+        ctx.globalAlpha = 0.6;
+        ctx.drawImage(baseImage, 0, 0, size, size);
+        ctx.globalAlpha = 1.0;
+
+        // Draw rotating arc
+        const cx = size / 2;
+        const cy = size / 2;
+        const radius = size / 2 - 2;
+        const startAngle = progress * 2 * Math.PI - Math.PI / 2;
+        const arcLength = Math.PI * 1.2;
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, startAngle, startAngle + arcLength);
+        ctx.strokeStyle = options.color;
+        ctx.lineWidth = Math.max(2, size * 0.08);
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+
+    _drawPulse(ctx, size, progress, baseImage, _options) {
+        const alpha = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(progress * 2 * Math.PI));
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(baseImage, 0, 0, size, size);
+        ctx.globalAlpha = 1.0;
+    }
+
+    // --- Existing methods (unchanged) ---
 
     syncAcrossTabs() {
         try {

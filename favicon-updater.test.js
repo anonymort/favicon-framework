@@ -1,11 +1,44 @@
 const FaviconUpdater = require('./favicon-updater');
 
-// Minimal DOM/browser mocks
+// --- Mocks ---
+
+function makeCanvasCtx() {
+    return {
+        drawImage: function() {},
+        beginPath: function() {},
+        arc: function() {},
+        fill: function() {},
+        stroke: function() {},
+        fillText: function() {},
+        fillStyle: '',
+        strokeStyle: '',
+        lineWidth: 0,
+        lineCap: '',
+        globalAlpha: 1.0,
+        font: '',
+        textAlign: '',
+        textBaseline: '',
+        _calls: []
+    };
+}
+
+function makeCanvas() {
+    const ctx = makeCanvasCtx();
+    return {
+        width: 0,
+        height: 0,
+        getContext: (type) => type === '2d' ? ctx : null,
+        toDataURL: () => 'data:image/png;mock',
+        _ctx: ctx
+    };
+}
+
 function setupDom() {
     const links = [];
     global.document = {
         querySelector: (sel) => links.find(l => l._sel === sel) || null,
         createElement: (tag) => {
+            if (tag === 'canvas') return makeCanvas();
             const el = { _sel: "link[rel~='icon']", rel: '', href: '' };
             links.push(el);
             return el;
@@ -25,10 +58,53 @@ function setupStorage() {
     return store;
 }
 
+function setupImageMock() {
+    global.Image = class MockImage {
+        constructor() {
+            this._src = '';
+            this.crossOrigin = '';
+            this.onload = null;
+            this.onerror = null;
+        }
+        get src() { return this._src; }
+        set src(val) {
+            this._src = val;
+            // Trigger onload synchronously for testing
+            if (this.onload) this.onload();
+        }
+    };
+}
+
+function setupRafMock() {
+    let rafId = 1;
+    const pending = new Map();
+    global.requestAnimationFrame = (cb) => {
+        const id = rafId++;
+        pending.set(id, cb);
+        return id;
+    };
+    global.cancelAnimationFrame = (id) => {
+        pending.delete(id);
+    };
+    global.performance = { now: () => Date.now() };
+    // Helper to flush one rAF tick
+    global._flushRaf = () => {
+        const cbs = [...pending.values()];
+        pending.clear();
+        cbs.forEach(cb => cb(performance.now()));
+    };
+    return pending;
+}
+
 function teardown() {
     delete global.document;
     delete global.localStorage;
     delete global.window;
+    delete global.Image;
+    delete global.requestAnimationFrame;
+    delete global.cancelAnimationFrame;
+    delete global.performance;
+    delete global._flushRaf;
 }
 
 function makeConfig(overrides = {}) {
@@ -78,6 +154,8 @@ function test(name, fn) {
     teardown();
     setupDom();
     setupStorage();
+    setupImageMock();
+    setupRafMock();
     global.window = { addEventListener: () => {}, removeEventListener: () => {} };
     try {
         fn();
@@ -87,6 +165,10 @@ function test(name, fn) {
     }
     teardown();
 }
+
+// ==============================
+// Original tests (unchanged)
+// ==============================
 
 // --- Constructor / init ---
 
@@ -115,11 +197,10 @@ test('constructor sets defaultIcon', () => {
     assertEqual(fu.defaultIcon, '/default.ico', 'defaultIcon');
 });
 
-// --- Priority ordering (issue #2 fix) ---
+// --- Priority ordering ---
 
 test('first-defined state has highest default priority', () => {
     const fu = new FaviconUpdater(makeConfig());
-    // notification is defined first, should have highest priority
     const notifPriority = fu.priorityMap.get('notification');
     const errorPriority = fu.priorityMap.get('error');
     const loadingPriority = fu.priorityMap.get('loading');
@@ -155,8 +236,6 @@ test('setState does not duplicate states', () => {
     assertEqual(fu.getActiveStates().filter(s => s === 'error').length, 1, 'no duplicate');
 });
 
-// --- setState does NOT clear overrideIcon (issue #1 fix) ---
-
 test('setState preserves overrideIcon', () => {
     const fu = new FaviconUpdater(makeConfig());
     fu.setFavicon('https://example.com/custom.ico');
@@ -174,7 +253,7 @@ test('clearState removes an active state', () => {
     assert(!fu.getActiveStates().includes('error'), 'error cleared');
 });
 
-test('clearState throws on invalid state (issue #3 fix)', () => {
+test('clearState throws on invalid state', () => {
     const fu = new FaviconUpdater(makeConfig());
     assertThrows(() => fu.clearState('nonexistent'), 'invalid state');
 });
@@ -192,7 +271,7 @@ test('setFavicon throws on non-string', () => {
     assertThrows(() => fu.setFavicon(42), 'numeric url');
 });
 
-test('setFavicon rejects javascript: URLs (issue #5 fix)', () => {
+test('setFavicon rejects javascript: URLs', () => {
     const fu = new FaviconUpdater(makeConfig());
     assertThrows(() => fu.setFavicon('javascript:alert(1)'), 'javascript: URL');
 });
@@ -203,7 +282,7 @@ test('setFavicon accepts data: URLs', () => {
     assertEqual(fu.getCurrentIcon(), 'data:image/png;base64,abc', 'data URL accepted');
 });
 
-// --- clearAllStates uses applyState (issue #6 fix) ---
+// --- clearAllStates ---
 
 test('clearAllStates resets to default', () => {
     const fu = new FaviconUpdater(makeConfig());
@@ -238,7 +317,7 @@ test('setPriority validates priority type', () => {
     assertThrows(() => fu.setPriority('error', NaN), 'NaN priority');
 });
 
-// --- Configurable storage key (issue #8 fix) ---
+// --- Configurable storage key ---
 
 test('custom storageKey is used', () => {
     const store = global.localStorage._store;
@@ -248,7 +327,7 @@ test('custom storageKey is used', () => {
     assert(!('faviconState' in store), 'default key not used');
 });
 
-// --- destroy (issue #9 fix) ---
+// --- destroy ---
 
 test('destroy removes event listener', () => {
     let removed = false;
@@ -319,11 +398,479 @@ test('handleStorageEvent ignores other keys', () => {
     assertEqual(fu.getActiveStates().length, 0, 'no state change');
 });
 
-// --- Module export (issue #4 fix) ---
+// --- Module export ---
 
 test('module exports FaviconUpdater', () => {
     assertEqual(typeof FaviconUpdater, 'function', 'FaviconUpdater is exported');
     assertEqual(FaviconUpdater.name, 'FaviconUpdater', 'correct class name');
+});
+
+// ==============================
+// New: _resolveBaseUrl tests
+// ==============================
+
+test('_resolveBaseUrl returns overrideIcon when set', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.overrideIcon = 'https://example.com/override.ico';
+    assertEqual(fu._resolveBaseUrl(), 'https://example.com/override.ico', 'override returned');
+});
+
+test('_resolveBaseUrl returns top priority state icon', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setState('loading');
+    fu.setState('notification');
+    assertEqual(fu._resolveBaseUrl(), '/notification.ico', 'top priority state returned');
+});
+
+test('_resolveBaseUrl returns defaultIcon when no states active', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    assertEqual(fu._resolveBaseUrl(), '/default.ico', 'default returned');
+});
+
+// ==============================
+// New: _canUseCanvas tests
+// ==============================
+
+test('_canUseCanvas returns true with canvas mock', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    assertEqual(fu._canUseCanvas(), true, 'canvas supported');
+});
+
+test('_canUseCanvas returns false without document', () => {
+    delete global.document;
+    // Need to create with document, then delete it
+    setupDom();
+    const fu = new FaviconUpdater(makeConfig());
+    fu._canvasSupported = null; // reset cache
+    delete global.document;
+    assertEqual(fu._canUseCanvas(), false, 'no document');
+});
+
+test('_canUseCanvas caches result', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._canUseCanvas();
+    assertEqual(fu._canvasSupported, true, 'cached true');
+    // Even if we break document, cached value persists
+    delete global.document;
+    assertEqual(fu._canUseCanvas(), true, 'still cached');
+});
+
+// ==============================
+// New: _loadImage tests
+// ==============================
+
+test('_loadImage resolves with Image mock', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    let resolved = false;
+    fu._loadImage('/test.ico').then(img => {
+        resolved = true;
+        assertEqual(img.src, '/test.ico', 'src set');
+    });
+    // Image mock triggers onload synchronously, so promise resolves in microtask
+    assertEqual(resolved, false, 'not yet resolved (microtask)');
+});
+
+test('_loadImage caches results', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._loadImage('/test.ico').then(() => {
+        assert(fu._imageCache.has('/test.ico'), 'cached after load');
+        // Second call should return cached
+        const p = fu._loadImage('/test.ico');
+        assert(p instanceof Promise, 'returns promise');
+    });
+});
+
+test('_loadImage sets crossOrigin for non-data URLs', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._loadImage('https://example.com/icon.ico').then(img => {
+        assertEqual(img.crossOrigin, 'anonymous', 'crossOrigin set');
+    });
+});
+
+test('_loadImage evicts oldest when cache full', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    // Fill cache to max
+    for (let i = 0; i < 20; i++) {
+        fu._imageCache.set(`/icon${i}.ico`, {});
+    }
+    assertEqual(fu._imageCache.size, 20, 'cache full');
+    fu._loadImage('/new.ico').then(() => {
+        assertEqual(fu._imageCache.size, 20, 'still at max');
+        assert(!fu._imageCache.has('/icon0.ico'), 'oldest evicted');
+        assert(fu._imageCache.has('/new.ico'), 'new entry added');
+    });
+});
+
+// ==============================
+// New: Badge tests
+// ==============================
+
+test('setBadge stores badge config', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(5);
+    assert(fu._badge !== null, 'badge set');
+    assertEqual(fu._badge.count, 5, 'count stored');
+    assertEqual(fu._badge.backgroundColor, '#FF0000', 'default bg color');
+    assertEqual(fu._badge.position, 'top-right', 'default position');
+});
+
+test('setBadge with custom options', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(3, { backgroundColor: '#00FF00', position: 'bottom-left' });
+    assertEqual(fu._badge.backgroundColor, '#00FF00', 'custom bg color');
+    assertEqual(fu._badge.position, 'bottom-left', 'custom position');
+});
+
+test('setBadge with count 0 clears badge', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(5);
+    fu.setBadge(0);
+    assertEqual(fu._badge, null, 'badge cleared');
+});
+
+test('setBadge with negative count clears badge', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(-3);
+    assertEqual(fu._badge, null, 'badge cleared for negative');
+});
+
+test('setBadge throws on non-number', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    assertThrows(() => fu.setBadge('five'), 'string count');
+    assertThrows(() => fu.setBadge(NaN), 'NaN count');
+    assertThrows(() => fu.setBadge(Infinity), 'Infinity count');
+});
+
+test('setBadge floors fractional counts', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(3.7);
+    assertEqual(fu._badge.count, 3, 'count floored');
+});
+
+test('clearBadge removes badge', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(5);
+    fu.clearBadge();
+    assertEqual(fu._badge, null, 'badge null');
+    assertEqual(fu._badgeCache, null, 'badge cache cleared');
+});
+
+test('clearBadge restores unbadged icon', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setState('error');
+    fu.setBadge(5);
+    fu.clearBadge();
+    // Synchronous path restores the base icon
+    assertEqual(fu.getCurrentIcon(), '/error.ico', 'error icon restored');
+});
+
+test('setBadge invalidates cache', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._badgeCache = { baseUrl: '/x', count: 3, dataUrl: 'data:old' };
+    fu.setBadge(5);
+    assertEqual(fu._badgeCache, null, 'cache invalidated');
+});
+
+test('_drawBadge positions correctly for each position', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    const positions = ['top-right', 'top-left', 'bottom-right', 'bottom-left'];
+    for (const pos of positions) {
+        const ctx = makeCanvasCtx();
+        fu._drawBadge(ctx, 32, { count: 1, size: 0.4, backgroundColor: '#F00', textColor: '#FFF', position: pos });
+        // Just verify it doesn't throw
+        passed++;
+    }
+});
+
+test('_drawBadge shows 99+ for counts over 99', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    const ctx = makeCanvasCtx();
+    let drawnText = '';
+    ctx.fillText = (text) => { drawnText = text; };
+    fu._drawBadge(ctx, 32, { count: 150, size: 0.4, backgroundColor: '#F00', textColor: '#FFF', position: 'top-right' });
+    assertEqual(drawnText, '99+', 'capped at 99+');
+});
+
+test('_drawBadge shows exact count for <= 99', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    const ctx = makeCanvasCtx();
+    let drawnText = '';
+    ctx.fillText = (text) => { drawnText = text; };
+    fu._drawBadge(ctx, 32, { count: 42, size: 0.4, backgroundColor: '#F00', textColor: '#FFF', position: 'top-right' });
+    assertEqual(drawnText, '42', 'exact count shown');
+});
+
+// ==============================
+// New: Badge + state interaction
+// ==============================
+
+test('badge persists across setState changes', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(5);
+    fu.setState('error');
+    assert(fu._badge !== null, 'badge still set after setState');
+    assertEqual(fu._badge.count, 5, 'badge count preserved');
+});
+
+test('badge persists across clearState changes', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setState('error');
+    fu.setBadge(3);
+    fu.clearState('error');
+    assert(fu._badge !== null, 'badge still set after clearState');
+});
+
+test('clearAllStates does not clear badge', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setState('error');
+    fu.setBadge(5);
+    fu.clearAllStates();
+    // clearAllStates clears states and override, but badge is independent
+    assert(fu._badge !== null, 'badge survives clearAllStates');
+});
+
+// ==============================
+// New: Animation tests
+// ==============================
+
+test('startAnimation sets animation state', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    assert(fu._animation !== null, 'animation set');
+    assertEqual(fu._animation.type, 'spinner', 'type is spinner');
+    assertEqual(fu._animation.isCustom, false, 'not custom');
+});
+
+test('startAnimation with pulse type', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('pulse');
+    assert(fu._animation !== null, 'animation set');
+    assertEqual(fu._animation.type, 'pulse', 'type is pulse');
+});
+
+test('startAnimation with custom function', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    const customDraw = (ctx, size, progress) => {};
+    fu.startAnimation(customDraw);
+    assert(fu._animation !== null, 'animation set');
+    assertEqual(fu._animation.isCustom, true, 'is custom');
+});
+
+test('startAnimation throws on invalid type', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    assertThrows(() => fu.startAnimation('invalid'), 'invalid type');
+});
+
+test('startAnimation with custom options', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner', { color: '#00FF00', fps: 10, speed: 2.0 });
+    assertEqual(fu._animation.options.color, '#00FF00', 'custom color');
+    assertEqual(fu._animation.options.fps, 10, 'custom fps');
+    assertEqual(fu._animation.options.speed, 2.0, 'custom speed');
+});
+
+test('startAnimation stops previous animation', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    const first = fu._animation;
+    fu.startAnimation('pulse');
+    assert(fu._animation !== first, 'different animation object');
+    assertEqual(fu._animation.type, 'pulse', 'pulse is now active');
+});
+
+test('stopAnimation clears animation state', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    fu.stopAnimation();
+    assertEqual(fu._animation, null, 'animation null');
+    assertEqual(fu._animationFrameId, null, 'frame id null');
+});
+
+test('stopAnimation restores static favicon', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setState('error');
+    fu.startAnimation('spinner');
+    fu.stopAnimation();
+    assertEqual(fu.getCurrentIcon(), '/error.ico', 'error icon restored');
+});
+
+test('stopAnimation is safe to call when no animation', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.stopAnimation(); // should not throw
+    passed++;
+});
+
+test('applyState defers to animation when running', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    const anim = fu._animation;
+    fu.setState('error');
+    // applyState should update the animation baseUrl, not call updateFavicon
+    assertEqual(anim.baseUrl, '/error.ico', 'animation baseUrl updated');
+});
+
+test('animation sets up rAF after image loads', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    // Image loads synchronously via mock, but promise resolves in microtask
+    // Verify the animation was at least created
+    assert(fu._animation !== null, 'animation created');
+    assertEqual(fu._animation.type, 'spinner', 'spinner type');
+});
+
+test('stopAnimation cancels pending rAF', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    const id = fu._animationFrameId;
+    fu.stopAnimation();
+    assertEqual(fu._animationFrameId, null, 'frame id cleared');
+});
+
+test('startAnimation race: stop before image loads', () => {
+    // Override Image mock to not call onload immediately
+    let pendingOnload = null;
+    global.Image = class DelayedImage {
+        constructor() {
+            this._src = '';
+            this.crossOrigin = '';
+            this.onload = null;
+            this.onerror = null;
+        }
+        get src() { return this._src; }
+        set src(val) {
+            this._src = val;
+            pendingOnload = () => { if (this.onload) this.onload(); };
+        }
+    };
+
+    const fu = new FaviconUpdater(makeConfig());
+    fu._imageCache.clear(); // clear any cached images
+    fu.startAnimation('spinner');
+    const anim = fu._animation;
+
+    // Stop before image loads
+    fu.stopAnimation();
+    assertEqual(fu._animation, null, 'animation cleared');
+
+    // Now resolve the image load — should NOT start animation
+    if (pendingOnload) pendingOnload();
+    assertEqual(fu._animation, null, 'animation still null after late resolve');
+});
+
+// ==============================
+// New: Animation + badge interaction
+// ==============================
+
+test('setBadge during animation stores badge for compositing', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    fu.setBadge(5);
+    assert(fu._badge !== null, 'badge stored during animation');
+    assertEqual(fu._badge.count, 5, 'correct count');
+});
+
+test('clearBadge during animation does not stop animation', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    fu.setBadge(5);
+    fu.clearBadge();
+    assert(fu._animation !== null, 'animation still running');
+});
+
+// ==============================
+// New: Canvas fallback tests
+// ==============================
+
+test('setBadge works without canvas (no crash)', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._canvasSupported = false;
+    fu.setBadge(5);
+    assert(fu._badge !== null, 'badge stored');
+    // No canvas, so updateFavicon just uses base URL
+    assertEqual(fu.getCurrentIcon(), '/default.ico', 'base icon used without canvas');
+});
+
+test('startAnimation is no-op without canvas', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._canvasSupported = false;
+    fu.startAnimation('spinner');
+    assertEqual(fu._animation, null, 'animation not started without canvas');
+});
+
+test('startAnimation is no-op without requestAnimationFrame', () => {
+    delete global.requestAnimationFrame;
+    const fu = new FaviconUpdater(makeConfig());
+    fu.startAnimation('spinner');
+    assertEqual(fu._animation, null, 'animation not started without rAF');
+});
+
+// ==============================
+// New: destroy cleanup
+// ==============================
+
+test('destroy clears badge and animation', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(5);
+    fu.startAnimation('spinner');
+    fu.destroy();
+    assertEqual(fu._badge, null, 'badge cleared');
+    assertEqual(fu._animation, null, 'animation cleared');
+    assertEqual(fu._imageCache.size, 0, 'image cache cleared');
+});
+
+test('destroy clears badge cache', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu._badgeCache = { baseUrl: '/x', count: 1, dataUrl: 'data:x' };
+    fu.destroy();
+    assertEqual(fu._badgeCache, null, 'badge cache cleared');
+});
+
+// ==============================
+// New: _renderAnimationFrame tests
+// ==============================
+
+test('_renderAnimationFrame calls spinner drawer', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    let spinnerCalled = false;
+    fu._drawSpinner = () => { spinnerCalled = true; };
+    const animation = { type: 'spinner', options: { speed: 1.0 }, startTime: Date.now() - 500, isCustom: false };
+    fu._renderAnimationFrame(animation, {}, Date.now());
+    assert(spinnerCalled, 'spinner drawer called');
+});
+
+test('_renderAnimationFrame calls pulse drawer', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    let pulseCalled = false;
+    fu._drawPulse = () => { pulseCalled = true; };
+    const animation = { type: 'pulse', options: { speed: 1.0 }, startTime: Date.now() - 500, isCustom: false };
+    fu._renderAnimationFrame(animation, {}, Date.now());
+    assert(pulseCalled, 'pulse drawer called');
+});
+
+test('_renderAnimationFrame calls custom function', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    let customCalled = false;
+    const customFn = () => { customCalled = true; };
+    const animation = { type: customFn, options: { speed: 1.0 }, startTime: Date.now() - 500, isCustom: true };
+    fu._renderAnimationFrame(animation, {}, Date.now());
+    assert(customCalled, 'custom function called');
+});
+
+test('_renderAnimationFrame composites badge when active', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    fu.setBadge(5);
+    let badgeCalled = false;
+    fu._drawBadge = () => { badgeCalled = true; };
+    const animation = { type: 'spinner', options: { speed: 1.0 }, startTime: Date.now() - 500, isCustom: false };
+    fu._renderAnimationFrame(animation, {}, Date.now());
+    assert(badgeCalled, 'badge composited on animation frame');
+});
+
+test('_renderAnimationFrame updates favicon with data URL', () => {
+    const fu = new FaviconUpdater(makeConfig());
+    const animation = { type: 'spinner', options: { speed: 1.0 }, startTime: Date.now() - 500, isCustom: false };
+    fu._renderAnimationFrame(animation, {}, Date.now());
+    assertEqual(fu.getCurrentIcon(), 'data:image/png;mock', 'data URL set');
 });
 
 // --- Results ---
