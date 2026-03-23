@@ -22,7 +22,21 @@ The Dynamic Favicon Updater is a lightweight JavaScript class designed to enhanc
 
 ## Installation
 
-Include the `favicon-updater.js` script in your HTML file:
+### npm
+
+```bash
+npm install dynamic-favicon-updater
+```
+
+```javascript
+// CommonJS
+const FaviconUpdater = require('dynamic-favicon-updater');
+
+// ESM
+import FaviconUpdater from 'dynamic-favicon-updater';
+```
+
+### Script tag
 
 ```html
 <script src="path/to/favicon-updater.js"></script>
@@ -110,6 +124,69 @@ Retrieve the URL of the currently displayed favicon.
 
 ```javascript
 const currentIcon = faviconUpdater.getCurrentIcon();
+```
+
+### Notification Badges
+
+Display a count badge overlaid on the favicon using canvas.
+
+```javascript
+// Show badge with count
+faviconUpdater.setBadge(5);
+
+// With custom options
+faviconUpdater.setBadge(3, {
+    backgroundColor: '#FF0000', // Badge circle color (default: '#FF0000')
+    textColor: '#FFFFFF',       // Count text color (default: '#FFFFFF')
+    size: 0.4,                  // Badge size relative to favicon, 0-1 (default: 0.4)
+    position: 'top-right'       // 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left'
+});
+
+// Clear the badge
+faviconUpdater.clearBadge();
+```
+
+Counts greater than 99 are displayed as "99+". Falls back to the unbadged icon if canvas is unavailable.
+
+### Animated Favicons
+
+Start animated favicon effects using requestAnimationFrame.
+
+```javascript
+// Built-in spinner animation
+faviconUpdater.startAnimation('spinner');
+
+// Built-in pulse animation
+faviconUpdater.startAnimation('pulse');
+
+// With options
+faviconUpdater.startAnimation('spinner', {
+    color: '#4285F4', // Animation color (default: '#4285F4')
+    speed: 1.0,       // Speed multiplier (default: 1.0)
+    fps: 15           // Frames per second cap (default: 15)
+});
+
+// Custom animation function
+faviconUpdater.startAnimation((ctx, size, progress, baseImage) => {
+    ctx.drawImage(baseImage, 0, 0, size, size);
+    ctx.globalAlpha = progress;
+    ctx.fillStyle = 'red';
+    ctx.fillRect(0, 0, size * progress, 4);
+    ctx.globalAlpha = 1.0;
+});
+
+// Stop animation
+faviconUpdater.stopAnimation();
+```
+
+Badges are composited on top of animations when both are active. Animations automatically pause in background tabs and resume when the tab becomes visible.
+
+### Cleanup
+
+Remove all event listeners and release resources. Call this when the updater is no longer needed (e.g., in SPAs on route change).
+
+```javascript
+faviconUpdater.destroy();
 ```
 
 ## Error Handling

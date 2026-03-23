@@ -1,0 +1,33 @@
+{
+  "name": "dynamic-favicon-updater",
+  "version": "1.0.0",
+  "description": "Lightweight JavaScript library for dynamically updating browser favicons with state management, notification badges, and animations",
+  "main": "favicon-updater.js",
+  "module": "favicon-updater.mjs",
+  "types": "favicon-updater.d.ts",
+  "files": [
+    "favicon-updater.js",
+    "favicon-updater.mjs",
+    "favicon-updater.d.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node favicon-updater.test.js"
+  },
+  "keywords": [
+    "favicon",
+    "dynamic",
+    "badge",
+    "notification",
+    "animation",
+    "browser-tab",
+    "spinner"
+  ],
+  "author": "Matt Kneale",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anonymort/favicon-framework.git"
+  }
+}
